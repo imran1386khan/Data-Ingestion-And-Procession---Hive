@@ -1,0 +1,336 @@
+--Import Neccessary Dependencies------------
+ADD JAR hdfs:///jars/hive-hcatalog-core-1.1.1.jar;
+
+SET hive.exec.max.dynamic.partitions=100000;
+SET hive.exec.max.dynamic.partitions.pernode=100000;
+
+---------------------------------------------------------------ANALYSIS I-------------------------------------------------------------------------------------------
+
+-----Tables creation and EDA-----
+drop table imr1;
+                    
+CREATE EXTERNAL TABLE imr1(VendorID INT,
+                                        tpep_pickup_datetime STRING, tpep_dropoff_datetime STRING, Passenger_count int,trip_distance DOUBLE,
+                                        RatecodeID INT,store_and_fwd_flag STRING, PULocationID INT, DOLocationID INT, payment_type INT,fare_amount DOUBLE,
+                                        extra DOUBLE, mta_tax DOUBLE,tip_amount DOUBLE,tolls_amount DOUBLE,improvement_surcharge DOUBLE,total_amount DOUBLE)
+                                        ROW FORMAT SERDE 'org.apache.hadoop.hive.serde2.OpenCSVSerde'
+                                        WITH SERDEPROPERTIES (
+                                       "separatorChar" = ",")
+                                        location '/common_folder/nyc_taxi_data/'
+                                        tblproperties("skip.header.line.count"="1");
+
+
+
+date_format(tpep_pickup_datetime,'MM')
+
+--vendor 1 have given around 6813 false data and vendor 2 around 11 erroneous information about passenger count.
+SELECT vendorid, count(*) FROM imr1 
+where passenger_count = 0
+group by  vendorid;
+
+-- There are close to 4856 rows that are not $0.0(Extra not paid), $0.5 or $1.0. This needs to be removed from the table.
+SELECT count(*) FROM imr1 where 
+date_format(tpep_pickup_datetime,'MM') IN (11, 12)
+and extra not in (0.0,0.5,1.0);
+
+
+SELECT DISTINCT(VendorID) from imr1; -- This column is good with respect to the required fields mentioned in data dictionary. 
+SELECT DISTINCT(RateCodeID) from imr1; -- Found 99 as extra ratecodeid, this needs to be removed from dataset.
+SELECT DISTINCT(Store_and_fwd_flag) from imr1; -- This column is good with respect to the required fields mentioned in data dictionary. 
+SELECT DISTINCT(Payment_type) from imr1; -- This column is good with respect to the required fields mentioned in data dictionary. 
+
+
+SELECT * from imr1 where Trip_distance <= 0; -- There are values equal to 0, which needs to be removed from the dataset.
+
+SELECT count(*) FROM imr1 where PULocationID = DOLocationID and Trip_distance !=0; -- This seems to be an anomaly since if trip distance should not change if both the location IDs are same, unless some one is just doing a round trip from point A to point B without getting down which seems non- sensible.
+
+SELECT * FROM imr1 where Fare_amount < 0;  -- There are values that are negative which seems erroneous.
+
+SELECT * FROM imr1 where Extra < 0;  -- There are values that are negative which seems erroneous.
+
+SELECT * FROM imr1 where MTA_tax < 0;  -- There are values that are negative which seems erroneous.
+
+SELECT * FROM imr1 where Improvement_surcharge < 0;  -- There are values that are negative which seems erroneous.
+
+SELECT * FROM imr1 where Tip_amount < 0; -- There are values that are negative which seems erroneous.
+
+SELECT * FROM imr1 where Tolls_amount < 0;  -- There are values that are negative which seems erroneous.
+
+SELECT * FROM imr1 where Total_amount < 0;  -- There are values that are negative which seems erroneous.
+
+
+
+-- Creating Tables so that refined data can be inserted to it.
+
+
+DROP TABLE IF EXISTS imr2;
+
+CREATE EXTERNAL TABLE imr2(VendorID INT,
+                                        tpep_pickup_datetime STRING, tpep_dropoff_datetime STRING, Passenger_count int,trip_distance DOUBLE,
+                                        RatecodeID INT,store_and_fwd_flag STRING, PULocationID INT, DOLocationID INT, payment_type INT,fare_amount DOUBLE,
+                                        extra DOUBLE, mta_tax DOUBLE,tip_amount DOUBLE,tolls_amount DOUBLE,improvement_surcharge DOUBLE,total_amount DOUBLE
+                                        );
+
+insert into table imr2 
+    select * from imr1 
+    where 
+    date_format(tpep_pickup_datetime,'MM') IN (11, 12)
+    and passenger_count != 0
+    and Trip_distance > 0.0
+    and RateCodeID in (1,2,3,4,5,6)
+    and extra in (0.0,0.5,1.0)
+    and MTA_tax in (0.0,0.5)
+    and Improvement_surcharge in (0.0,0.3)
+    and Payment_type in (1,2,3,4,5,6)
+    and Fare_amount >= 0.0
+    and Tip_amount >= 0.0
+    and Tolls_amount >= 0.0
+    and Total_amount >= 0.0;
+
+Select count(*) from imr2; -- Total Rows left in dataset after data clean up.
+
+
+-- describe formatted imr_nyc_taxi_table;
+
+
+DROP TABLE imr_nyc_taxi_table;
+
+CREATE EXTERNAL TABLE imr_nyc_taxi_table(VendorID INT,
+                                        tpep_pickup_datetime STRING, tpep_dropoff_datetime STRING, Passenger_count int,trip_distance DOUBLE,
+                                        RatecodeID INT,store_and_fwd_flag STRING, PULocationID INT, DOLocationID INT, payment_type INT,fare_amount DOUBLE,
+                                        extra DOUBLE, mta_tax DOUBLE,tip_amount DOUBLE,tolls_amount DOUBLE,improvement_surcharge DOUBLE,total_amount DOUBLE
+                                        ,yr int, mnth int);
+                                        
+INSERT INTO TABLE imr_nyc_taxi_table
+SELECT VendorID, tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,RatecodeID,store_and_fwd_flag,
+        PULocationID,DOLocationID,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount,
+        date_format(tpep_pickup_datetime,'yyyy'), date_format(tpep_pickup_datetime,'MM')
+        FROM imr2;
+
+SELECT * FROM imr_nyc_taxi_table;
+
+--------Creating Partitioning on the Table on Year and Month---------
+
+DROP table imr_nyc_taxi_table_partitioned_yr_mnth;
+
+CREATE EXTERNAL TABLE IF NOT EXISTS imr_nyc_taxi_table_partitioned_yr_mnth(VendorID INT,
+                                        tpep_pickup_datetime STRING, tpep_dropoff_datetime STRING, Passenger_count int,trip_distance DOUBLE,
+                                        RatecodeID INT,store_and_fwd_flag STRING, PULocationID INT, DOLocationID INT, payment_type INT,fare_amount DOUBLE,
+                                        extra DOUBLE, mta_tax DOUBLE,tip_amount DOUBLE,tolls_amount DOUBLE,improvement_surcharge DOUBLE,total_amount DOUBLE)
+                                        PARTITIONED BY(yr int, mnth INT)
+                                        LOCATION '/user/hive/warehouse/konvicted1386_nyc_taxi_partition_yr_mnth';
+                                        
+insert overwrite table imr_nyc_taxi_table_partitioned_yr_mnth partition(yr, mnth)
+select VendorID,tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,RatecodeID,store_and_fwd_flag,
+        PULocationID,DOLocationID,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount,
+        yr, mnth
+        from imr_nyc_taxi_table;
+
+SELECT * from imr_nyc_taxi_table_partitioned_yr_mnth;
+
+SELECT count(*) FROM imr_nyc_taxi_table_partitioned_yr_mnth; -- Sanity Check to validate if we have all the data intact
+
+
+
+--------------Creating ORC tables-----------------
+
+
+-- describe formatted imr_nyc_taxi_table_partitioned_yr_mnth_orc;
+
+DROP TABLE imr_nyc_taxi_table_partitioned_yr_mnth_orc;
+
+
+CREATE EXTERNAL TABLE IF NOT EXISTS imr_nyc_taxi_table_partitioned_yr_mnth_orc(VendorID INT, tpep_pickup_datetime STRING,
+                                                                                             tpep_dropoff_datetime STRING,
+                                                                                             Passenger_count int,trip_distance DOUBLE,
+                                                                                            RatecodeID INT,store_and_fwd_flag STRING,
+                                                                                            PULocationID INT, DOLocationID INT, payment_type INT,fare_amount DO
+                                                                                            extra DOUBLE, mta_tax DOUBLE,tip_amount DOUBLE,tolls_amount DOUBLE,improvement_surcharge DOUBLE,
+                                                                                            total_amount DOUBLE) PARTITIONED BY(yr int, mnth INT) stored AS orc LOCATION '/user/hive/warehouse/konvicted1386_nyc_taxi_partition_yr_mnth_orc' tblproperties ("orc.compress"="SNAPPY");
+
+
+INSERT overwrite TABLE imr_nyc_taxi_table_partitioned_yr_mnth_orc partition(yr, mnth)
+SELECT *
+FROM imr_nyc_taxi_table_partitioned_yr_mnth;
+
+SELECT * from imr_nyc_taxi_table_partitioned_yr_mnth_orc
+limit 10;
+
+SELECT count(*) FROM imr_nyc_taxi_table_partitioned_yr_mnth_orc; -- Sanity Check to validate if we have all the data intact
+
+-------------------------------------------------------------------ANALYSIS I------------------------------------------------------------------------------------------
+
+--1. Compare the overall average fare per trip for November and December.
+
+SELECT avg(Fare_amount) from imr_nyc_taxi_table_partitioned_yr_mnth_orc
+where mnth = 11
+and yr = 2017;  -- 12.913
+
+
+SELECT avg(Fare_amount) from imr_nyc_taxi_table_partitioned_yr_mnth_orc
+where mnth = 12
+and yr = 2017;  -- 12.704
+
+
+
+SELECT avg(total_amount) from imr_nyc_taxi_table_partitioned_yr_mnth_orc
+where mnth = 11
+and yr = 2017;  -- 16.202
+
+
+SELECT avg(total_amount) from imr_nyc_taxi_table_partitioned_yr_mnth_orc
+where mnth = 12
+and yr = 2017;  -- 15.901
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+--2. Explore the ‘number of passengers per trip’ - how many trips are made by each level of ‘Passenger_count’? Do most people travel solo or with other people?
+
+SELECT passenger_count, count(*) as total_trips from imr_nyc_taxi_table_partitioned_yr_mnth_orc
+where yr = 2017
+group by passenger_count;  -- Its pretty clear that most of he people travel solo.
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+--3.Which is the most preferred mode of payment?
+
+SELECT payment_type, count(*) as total_payments FROM imr_nyc_taxi_table_partitioned_yr_mnth_orc
+where yr = 2017
+group by payment_type; --Most preferred mode of payment is Credit Card(payment_type 1) followed by Cash (payment_type 2).
+
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+-- 4. What is the average tip paid per trip? Compare the average tip with the 25th, 50th and 75th percentiles and comment whether the ‘average tip’ is a representative statistic (of the central tendency) of ‘tip amount paid’. Hint: You may use percentile_approx(DOUBLE col, p): Returns an approximate pth percentile of a numeric column (including floating point types) in the group.
+
+/*Mean*/
+SELECT avg(tip_amount) from imr_nyc_taxi_table_partitioned_yr_mnth_orc
+where yr = 2017; --> 1.827
+
+SELECT percentile_approx(tip_amount, 0.25) from imr_nyc_taxi_table_partitioned_yr_mnth_orc
+where yr = 2017; --> 0.0
+SELECT percentile_approx(tip_amount, 0.50) from imr_nyc_taxi_table_partitioned_yr_mnth_orc
+where yr = 2017; --> 1.35 (Median)
+SELECT percentile_approx(tip_amount, 0.75) from imr_nyc_taxi_table_partitioned_yr_mnth_orc
+where yr = 2017; --> 2.45
+SELECT percentile_approx(tip_amount, 0.90) from imr_nyc_taxi_table_partitioned_yr_mnth_orc
+where yr = 2017; --> 4.15
+
+/*Mode*/ --> This is $0.0
+select tip_amount from (
+    select tip_amount, count(tip_amount) as tip_cnt
+    from imr_nyc_taxi_table_partitioned_yr_mnth_orc
+    where yr = 2017
+    group by tip_amount
+    order by tip_cnt desc
+    limit 1
+) t1;
+
+
+/*
+As we can see that average tipped amount is $1.827. However, when we look at the percentile values we see that 
+    - About 25% of the people don't pay any tip.
+    - About 50% of the people are maximum tipping around $1.35 or below.
+    - About 75% of the people are maximum tipping around $2.45 or below.
+
+If we were to compare percentiles with average tip, we can see that average tip paid is more than the 50th percentile or 50% of the people are 
+paying more than the average overall tip.
+
+The data seems to be right skewed with a long tail on its right as we have Mode which is around $0 followed by Median $1.35 and at last Average at $1.827.
+There could be outliers or more generous people who usually tip more but the frequency is not that high who all fall to the right end of the distribution.
+
+*/
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+--5. Explore the ‘Extra’ (charge) variable - what fraction of total trips have an extra charge levied?
+
+
+SELECT ch1, count(ch1) as trips, round(100*(count(ch1)/1155590),4) as perc from
+(
+SELECT extra, case when extra = 0.0 then '0.0-charge'
+            when extra = 0.5 then '0.5-charge'
+            when extra = 1.0 then '1.0-charge'
+            END as ch1
+FROM imr_nyc_taxi_table_partitioned_yr_mnth_orc
+where yr = 2017
+) t1
+group by (ch1)
+;
+
+/*
+As we see that around 46.13% of the total trips have an extra charges levied but majority of the trips 53.87% doesn't get charged any extras.
+*/
+
+----------------------------------------------------------------ANALYSIS II--------------------------------------------------------------------------------------------
+--1. What is the correlation between the number of passengers on any given trip, and the tip paid per trip? Do multiple travellers tip more compared to solo travellers?
+
+SELECT corr(passenger_count, tip_amount) from imr_nyc_taxi_table_partitioned_yr_mnth_orc
+where yr = 2017;
+
+/*
+As we see there's a negative correlation (-0.0053) between passenger count and tip amount. Hence when one increases another decreases.
+So, more the number of passengers less the tip.
+*/
+
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+-- 2.Segregate the data into five segments of ‘tip paid’: [0-5), [5-10), [10-15) , [15-20) and >=20. Calculate the percentage share of each bucket (i.e. the fraction of trips falling in each bucket).
+
+
+select tip_range, count(tip_range) as tip_count, round(100*(count(tip_range)/1155590),4) as perc from (
+    select 
+    CASE 
+        WHEN Tip_amount >=0.0 and Tip_amount < 5.0 THEN '0-5'
+        WHEN Tip_amount >=5.0 and Tip_amount < 10.0 THEN '5-15'
+        WHEN Tip_amount >=10.0 and Tip_amount < 15.0 THEN '10-15'
+        WHEN Tip_amount >=15.0 and Tip_amount < 20.0 THEN '15-20'
+        WHEN Tip_amount >=20.0 THEN '20'
+        END as tip_range
+    from imr_nyc_taxi_table_partitioned_yr_mnth_orc
+    where yr = 2017
+) t1
+
+group by (tip_range)
+order by (perc) DESC;
+
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+-- 3. Which month has a greater average ‘speed’ - November or December? Note that the variable ‘speed’ will have to be derived from other metrics. Hint: You have columns for distance and time.
+
+
+select round(avg(speed),3) as avg_speed , trip_month from
+(
+select round(3600*(trip_distance/CAST((unix_timestamp(tpep_dropoff_datetime, "yyyy-MM-dd HH:mm:ss") - unix_timestamp(tpep_pickup_datetime, "yyyy-MM-dd HH:mm:ss")) as double)),3) as speed, trip_distance, round((unix_timestamp(tpep_dropoff_datetime, "yyyy-MM-dd HH:mm:ss") - unix_timestamp(tpep_pickup_datetime, "yyyy-MM-dd HH:mm:ss"))/3600,3) as Time, date_format(tpep_pickup_datetime,'MM') as trip_month
+from imr_nyc_taxi_table_partitioned_yr_mnth_orc
+where yr = 2017) t1
+ 
+group by trip_month
+ORDER BY avg_speed;
+
+
+
+/*
+Based on the below outcome we can see that Average speed for the month for December is higher than November*/
+
+
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+--4. Analyse the average speed of the most happening days of the year, i.e. 31st December (New year’s eve) and 25th December (Christmas) and compare it with the overall average.
+
+ 
+
+SELECT trip_day,trip_month,round(avg(speed),3) as avg_speed from
+(
+select round(3600*(trip_distance/CAST((unix_timestamp(tpep_dropoff_datetime, "yyyy-MM-dd HH:mm:ss") - unix_timestamp(tpep_pickup_datetime, "yyyy-MM-dd HH:mm:ss")) as double)),3) as speed, trip_distance, round((unix_timestamp(tpep_dropoff_datetime, "yyyy-MM-dd HH:mm:ss") - unix_timestamp(tpep_pickup_datetime, "yyyy-MM-dd HH:mm:ss"))/3600,3) as Time, date_format(tpep_pickup_datetime,'dd') as trip_day, date_format(tpep_pickup_datetime,'MM') as trip_month
+from imr_nyc_taxi_table_partitioned_yr_mnth_orc
+where yr = 2017
+) t1 
+
+group by trip_day,trip_month
+order by avg_speed desc;
+
+
+
+/*
+From the below chart which is grouped by days on X axis which also has a hue of November and December Month and on the Y-Axis we have average speed.
+We can see that specially on US Holidays the traffic is not so much and thus the speed of the vehicles are little bit more than usual business days.
+-- December 25th its highest around 15.26
+-- December 24th as well probably most of the people are staying home in celebration of festive season which is why traffic is fast hence the speed of the vehicles.
+-- December 31st on new year's eve. We have average speed high.
+-- November 26th and 23rd Thanks Giving (4th thrusday of November), we see that Average speed of the vehicles are high.
+-- November 11th Veterans Day, we see that Average speed of the vehicles are high.
+-- November 5th seems to be fairly good in terms of average speed.
+*/
